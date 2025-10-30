@@ -1,47 +1,54 @@
 /**
- * Universal Smooth Scroll v1.0
- * A standalone smooth scrolling solution that preserves fixed/sticky elements
- * Works with any HTML page without breaking existing functionality
+ * Universal Smooth Scroll v2.0
+ * A truly universal smooth scrolling solution that works on ANY page
+ * Preserves all fixed/sticky elements and existing scroll event listeners
  */
 
-(function() {
+(function () {
   'use strict';
 
-  // Wait for DOM to be ready
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', init);
-  } else {
-    init();
-  }
+  // Configuration - easily adjustable
+  const config = {
+    smoothFactor: 0.08,          // Lower = smoother (0.01-0.15)
+    touchSensitivity: 0.3,       // Touch scroll multiplier
+    inertiaMultiplier: 4,        // Momentum after touch release
+    inertiaDecay: 0.85,          // Velocity decay rate (0-1)
+    autoExcludeFixed: true,      // Automatically exclude fixed/sticky elements
+    excludeSelectors: [          // Additional elements to exclude
+      '[data-smooth-scroll-exclude]'
+    ]
+  };
 
+  // Wait for DOM to be fully loaded
   function init() {
-    // Configuration - easily adjustable
-    const config = {
-      smoothFactor: 0.08,          // Lower = smoother (0.01-0.15)
-      touchSensitivity: 0.3,       // Touch scroll multiplier
-      inertiaMultiplier: 4,        // Momentum after touch release
-      inertiaDecay: 0.85,          // Velocity decay rate (0-1)
-      excludeSelectors: [          // Elements to exclude from wrapping
-        '#scrollToTop',
-        '#bottomBlur',
-        '[data-smooth-scroll-exclude]'
-      ]
-    };
-
     const body = document.body;
     const html = document.documentElement;
 
-    // Get all children except excluded elements
+    // Find all elements that should be excluded
+    function shouldExclude(element) {
+      // Check custom exclude selectors
+      const matchesCustomSelector = config.excludeSelectors.some(selector =>
+        element.matches && element.matches(selector)
+      );
+      if (matchesCustomSelector) return true;
+
+      // Auto-detect fixed/sticky positioned elements
+      if (config.autoExcludeFixed) {
+        const style = window.getComputedStyle(element);
+        const position = style.position;
+        if (position === 'fixed' || position === 'sticky') return true;
+      }
+
+      return false;
+    }
+
+    // Separate content and fixed elements
     const allChildren = Array.from(body.children);
     const excludedElements = [];
     const contentElements = [];
 
     allChildren.forEach(child => {
-      const isExcluded = config.excludeSelectors.some(selector => 
-        child.matches(selector)
-      );
-      
-      if (isExcluded) {
+      if (shouldExclude(child)) {
         excludedElements.push(child);
       } else {
         contentElements.push(child);
@@ -57,14 +64,13 @@
 
     container.className = 'ss-container';
     scroller.className = 'ss-scroller';
+    container.setAttribute('data-smooth-scroll', 'true');
 
     // Move content into scroller
     contentElements.forEach(child => scroller.appendChild(child));
-    
-    // Add scroller to container
     container.appendChild(scroller);
-    
-    // Add container to body (excluded elements remain as direct children)
+
+    // Insert container as first child (fixed elements stay after)
     body.insertBefore(container, body.firstChild);
 
     // Add required styles
@@ -96,9 +102,8 @@
         will-change: transform;
         transform: translateZ(0);
       }
-      /* Ensure fixed elements stay on top */
+      /* Ensure excluded elements maintain their positioning */
       body > *:not(.ss-container) {
-        position: fixed;
         z-index: 1000;
       }
     `;
@@ -109,6 +114,7 @@
     let currentY = 0;
     let maxScroll = 0;
     let rafId = null;
+    let isAnimating = false;
 
     // Helper functions
     const clamp = (v, min, max) => Math.max(min, Math.min(max, v));
@@ -124,43 +130,14 @@
     // Initialize
     updateBounds();
 
-    // Animation loop
-    function animate() {
-      const diff = Math.abs(targetY - currentY);
-      
-      // Only animate if there's a meaningful difference
-      if (diff > 0.5) {
-        currentY = lerp(currentY, targetY, config.smoothFactor);
-        scroller.style.transform = `translate3d(0, -${round2(currentY)}px, 0)`;
-        rafId = requestAnimationFrame(animate);
-      } else {
-        currentY = targetY;
-        scroller.style.transform = `translate3d(0, -${round2(currentY)}px, 0)`;
-        rafId = null;
-      }
-      
-      // Update scroll position for scroll event listeners
-      updateScrollPosition();
-    }
+    // Dispatch scroll events for compatibility with existing listeners
+    function dispatchScrollEvent() {
+      // Create and dispatch scroll event
+      const scrollEvent = new Event('scroll', { bubbles: true });
+      window.dispatchEvent(scrollEvent);
 
-    function startAnimation() {
-      if (!rafId) {
-        rafId = requestAnimationFrame(animate);
-      }
-    }
-
-    // Dispatch custom scroll events for compatibility
-    let lastScrollY = 0;
-    function updateScrollPosition() {
-      if (Math.abs(currentY - lastScrollY) > 1) {
-        lastScrollY = currentY;
-        
-        // Dispatch scroll event
-        window.dispatchEvent(new CustomEvent('scroll', {
-          detail: { scrollY: currentY }
-        }));
-        
-        // Update window.pageYOffset for compatibility
+      // Update window scroll properties for compatibility
+      try {
         Object.defineProperty(window, 'pageYOffset', {
           get: () => currentY,
           configurable: true
@@ -169,6 +146,54 @@
           get: () => currentY,
           configurable: true
         });
+        Object.defineProperty(window, 'pageXOffset', {
+          get: () => 0,
+          configurable: true
+        });
+        Object.defineProperty(window, 'scrollX', {
+          get: () => 0,
+          configurable: true
+        });
+      } catch (e) {
+        // Properties might already be defined
+      }
+    }
+
+    // Animation loop
+    let lastDispatchY = 0;
+    function animate() {
+      const diff = Math.abs(targetY - currentY);
+
+      if (diff > 0.5) {
+        currentY = lerp(currentY, targetY, config.smoothFactor);
+        scroller.style.transform = `translate3d(0, -${round2(currentY)}px, 0)`;
+
+        // Dispatch scroll event if position changed significantly
+        if (Math.abs(currentY - lastDispatchY) > 1) {
+          dispatchScrollEvent();
+          lastDispatchY = currentY;
+        }
+
+        rafId = requestAnimationFrame(animate);
+        isAnimating = true;
+      } else {
+        currentY = targetY;
+        scroller.style.transform = `translate3d(0, -${round2(currentY)}px, 0)`;
+
+        // Final scroll event dispatch
+        if (Math.abs(currentY - lastDispatchY) > 0) {
+          dispatchScrollEvent();
+          lastDispatchY = currentY;
+        }
+
+        rafId = null;
+        isAnimating = false;
+      }
+    }
+
+    function startAnimation() {
+      if (!rafId) {
+        rafId = requestAnimationFrame(animate);
       }
     }
 
@@ -195,7 +220,7 @@
 
     function onTouchMove(e) {
       if (!isTouchDown) return;
-      
+
       const y = e.touches[0].clientY;
       const delta = lastTouchY - y;
       const now = performance.now();
@@ -234,40 +259,52 @@
 
     // Keyboard navigation
     function onKeyDown(e) {
+      // Don't intercept if user is typing in an input
+      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') {
+        return;
+      }
+
       const step = window.innerHeight * 0.8;
-      
-      switch(e.key) {
+      let handled = false;
+
+      switch (e.key) {
         case 'ArrowDown':
-        case 'PageDown':
-          e.preventDefault();
-          targetY = clamp(targetY + step, 0, maxScroll);
-          startAnimation();
+          targetY = clamp(targetY + 40, 0, maxScroll);
+          handled = true;
           break;
         case 'ArrowUp':
+          targetY = clamp(targetY - 40, 0, maxScroll);
+          handled = true;
+          break;
+        case 'PageDown':
+          targetY = clamp(targetY + step, 0, maxScroll);
+          handled = true;
+          break;
         case 'PageUp':
-          e.preventDefault();
           targetY = clamp(targetY - step, 0, maxScroll);
-          startAnimation();
+          handled = true;
           break;
         case 'Home':
-          e.preventDefault();
           targetY = 0;
-          startAnimation();
+          handled = true;
           break;
         case 'End':
-          e.preventDefault();
           targetY = maxScroll;
-          startAnimation();
+          handled = true;
           break;
         case ' ':
-          e.preventDefault();
           targetY = clamp(
-            targetY + (e.shiftKey ? -step : step), 
-            0, 
+            targetY + (e.shiftKey ? -step : step),
+            0,
             maxScroll
           );
-          startAnimation();
+          handled = true;
           break;
+      }
+
+      if (handled) {
+        e.preventDefault();
+        startAnimation();
       }
     }
 
@@ -275,9 +312,12 @@
     let resizeTimeout;
     window.addEventListener('resize', () => {
       clearTimeout(resizeTimeout);
-      resizeTimeout = setTimeout(updateBounds, 100);
+      resizeTimeout = setTimeout(() => {
+        updateBounds();
+        dispatchScrollEvent();
+      }, 100);
     });
-    
+
     container.addEventListener('wheel', onWheel, { passive: false });
     container.addEventListener('touchstart', onTouchStart, { passive: true });
     container.addEventListener('touchmove', onTouchMove, { passive: false });
@@ -286,17 +326,38 @@
 
     // Override window.scrollTo for compatibility
     const originalScrollTo = window.scrollTo;
-    window.scrollTo = function(x, y) {
+    window.scrollTo = function (x, y) {
       if (typeof x === 'object') {
-        targetY = clamp(x.top || x.y || 0, 0, maxScroll);
+        const options = x;
+        targetY = clamp(options.top || options.y || 0, 0, maxScroll);
+        if (options.behavior === 'smooth') {
+          startAnimation();
+        } else {
+          currentY = targetY;
+          scroller.style.transform = `translate3d(0, -${round2(currentY)}px, 0)`;
+          dispatchScrollEvent();
+        }
+      } else {
+        targetY = clamp(typeof y === 'number' ? y : 0, 0, maxScroll);
+        startAnimation();
+      }
+    };
+
+    // Override scrollBy
+    window.scrollBy = function (x, y) {
+      if (typeof x === 'object') {
+        const deltaY = x.top || x.y || 0;
+        targetY = clamp(targetY + deltaY, 0, maxScroll);
         if (x.behavior === 'smooth') {
           startAnimation();
         } else {
           currentY = targetY;
           scroller.style.transform = `translate3d(0, -${round2(currentY)}px, 0)`;
+          dispatchScrollEvent();
         }
       } else {
-        targetY = clamp(y, 0, maxScroll);
+        const deltaY = typeof y === 'number' ? y : 0;
+        targetY = clamp(targetY + deltaY, 0, maxScroll);
         startAnimation();
       }
     };
@@ -310,14 +371,29 @@
         } else {
           currentY = targetY;
           scroller.style.transform = `translate3d(0, -${round2(currentY)}px, 0)`;
+          dispatchScrollEvent();
+        }
+      },
+      scrollBy: (deltaY, smooth = true) => {
+        targetY = clamp(targetY + deltaY, 0, maxScroll);
+        if (smooth) {
+          startAnimation();
+        } else {
+          currentY = targetY;
+          scroller.style.transform = `translate3d(0, -${round2(currentY)}px, 0)`;
+          dispatchScrollEvent();
         }
       },
       getPosition: () => currentY,
       getMaxScroll: () => maxScroll,
-      updateBounds: updateBounds,
+      updateBounds: () => {
+        updateBounds();
+        dispatchScrollEvent();
+      },
       setConfig: (newConfig) => {
         Object.assign(config, newConfig);
       },
+      isAnimating: () => isAnimating,
       destroy: () => {
         // Remove event listeners
         container.removeEventListener('wheel', onWheel);
@@ -325,21 +401,30 @@
         container.removeEventListener('touchmove', onTouchMove);
         container.removeEventListener('touchend', onTouchEnd);
         window.removeEventListener('keydown', onKeyDown);
-        
+
         // Restore original structure
         contentElements.forEach(child => body.appendChild(child));
         container.remove();
         document.getElementById('smooth-scroll-styles')?.remove();
-        
-        // Restore scrollTo
+
+        // Restore native scrollTo
         window.scrollTo = originalScrollTo;
-        
+
         // Clean up
         if (rafId) cancelAnimationFrame(rafId);
       }
     };
 
-    // Initialize first frame
+    // Initialize - dispatch initial scroll event and start first frame
+    dispatchScrollEvent();
     startAnimation();
+  }
+
+  // Initialize when DOM is ready
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
+  } else {
+    // DOM already loaded, but wait a tick to ensure all scripts have run
+    setTimeout(init, 0);
   }
 })();
